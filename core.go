@@ -45,6 +45,8 @@ type core struct {
 	// Zap core.
 	tempLabels *labels
 
+	errorField *zap.Field
+
 	// Configuration for the zapdriver core
 	config driverConfig
 }
@@ -97,6 +99,19 @@ func WrapCore(options ...func(*core)) zap.Option {
 	})
 }
 
+func (c *core) extractErrorField(fields []zapcore.Field) *zapcore.Field {
+	if c.errorField != nil {
+		return c.errorField
+	}
+
+	for _, field := range fields {
+		if field.Type == zapcore.ErrorType {
+			return &field
+		}
+	}
+	return nil
+}
+
 // With adds structured context to the Core.
 func (c *core) With(fields []zap.Field) zapcore.Core {
 	var lbls *labels
@@ -119,6 +134,7 @@ func (c *core) With(fields []zap.Field) zapcore.Core {
 		permLabels: permLabels,
 		tempLabels: newLabels(),
 		config:     c.config,
+		errorField: c.extractErrorField(fields),
 	}
 }
 
@@ -164,12 +180,13 @@ func (c *core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 
 	if !c.config.SkipFmtStackTraces {
 		// only improve the stacktrace if the error is reported to stackdriver
-		reported, errorField := reportedError(fields)
+		reported, errorField := c.reportedError(fields)
 		if reported && errorField != nil {
-			// remove stackdriver-incompatible zap stack trace
-			ent.Stack = ""
-			errorField.Key = "exception"
-			errorField.Interface = stackdriverFmtError{errorField.Interface.(error)}
+			fields = append(fields, zap.Field{
+				Key:       "exception",
+				Type:      zapcore.ErrorType,
+				Interface: stackdriverFmtError{errorField.Interface.(error)},
+			})
 		}
 	}
 
@@ -178,20 +195,17 @@ func (c *core) Write(ent zapcore.Entry, fields []zapcore.Field) error {
 	return c.Core.Write(ent, fields)
 }
 
-func reportedError(fields []zapcore.Field) (reported bool, field *zapcore.Field) {
-	var errorField int = -1
+func (c *core) reportedError(fields []zapcore.Field) (reported bool, field *zapcore.Field) {
+	errorField := c.errorField
 	for i, field := range fields {
 		if field.Key == contextKey {
 			reported = true
 		}
 		if field.Type == zapcore.ErrorType {
-			errorField = i
+			errorField = &fields[i]
 		}
 	}
-	if errorField >= 0 {
-		return reported, &fields[errorField]
-	}
-	return reported, nil
+	return reported, errorField
 }
 
 // Sync flushes buffered logs (if any).
